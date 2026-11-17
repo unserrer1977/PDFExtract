@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use pdfmd_core::{router, AppState, ConvertFailure, Extract, OwnedPdf, PdfConvert, IMAGE_NOTICE};
+use pdfmd_core::{router, AppState, ConvertFailure, Extract, OwnedPdf, PdfConvert, ScriptedVision, VisionOutcome, IMAGE_NOTICE, VISION_NOTICE};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
@@ -28,10 +28,15 @@ impl PdfConvert for Fake {
 }
 
 fn app() -> axum::Router {
+    app_with(VisionOutcome::Skipped)
+}
+
+fn app_with(outcome: VisionOutcome) -> axum::Router {
     router(AppState {
         api_key: "test-key".into(),
         converter: Arc::new(Fake),
         slots: Arc::new(Semaphore::new(1)),
+        vision: Arc::new(ScriptedVision { outcome, calls: std::sync::atomic::AtomicUsize::new(0) }),
     })
 }
 
@@ -125,6 +130,71 @@ async fn image_pdf_is_reported_in_json_and_markdown() {
 }
 
 #[tokio::test]
+async fn an_image_pdf_uses_the_transcription_when_the_reader_returns_text() {
+    let response = app_with(VisionOutcome::Recovered("## Page 1\n\nChart total 40.\n".into()))
+        .oneshot(image_request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("x-image-based").unwrap(), "true");
+    let payload = body_json(response).await;
+    let markdown = payload["markdown"].as_str().unwrap();
+    assert!(markdown.contains("Chart total 40."));
+    assert!(markdown.contains(VISION_NOTICE));
+    assert!(!markdown.contains(IMAGE_NOTICE));
+    assert_eq!(payload["vision_fallback"], true);
+    assert_eq!(payload["notice"].as_str(), Some(VISION_NOTICE));
+}
+
+#[tokio::test]
+async fn a_text_pdf_does_not_ask_the_image_reader() {
+    let vision = Arc::new(ScriptedVision {
+        outcome: VisionOutcome::Recovered("## Page 1\n\nThis must not appear.\n".into()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let app = router(AppState {
+        api_key: "test-key".into(),
+        converter: Arc::new(Fake),
+        slots: Arc::new(Semaphore::new(1)),
+        vision: vision.clone(),
+    });
+    let response = app.oneshot(text_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(vision.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let payload = body_json(response).await;
+    assert_eq!(payload["vision_fallback"], false);
+    assert!(!payload["markdown"].as_str().unwrap().contains("This must not appear."));
+}
+
+fn image_request() -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/convert")
+        .header("authorization", "Bearer test-key")
+        .header("content-type", "multipart/form-data; boundary=edge")
+        .body(Body::from(
+            "--edge\r\nContent-Disposition: form-data; name=\"file\"; filename=\"scan.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\n/Subtype /Image\n\r\n--edge--\r\n",
+        ))
+        .unwrap()
+}
+
+fn text_request() -> Request<Body> {
+    let boundary = "pdfextract";
+    let pdf = b"%PDF-1.4\nHello from the text layer\n";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"notes.pdf\"\r\nContent-Type: application/pdf\r\n\r\n").as_bytes());
+    body.extend_from_slice(pdf);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Request::builder()
+        .method("POST")
+        .uri("/v1/convert")
+        .header("authorization", "Bearer test-key")
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
 async fn url_targets_on_the_private_network_are_rejected() {
     let response = app()
         .oneshot(
@@ -149,6 +219,7 @@ async fn an_unconfigured_key_is_not_an_open_service() {
         api_key: String::new(),
         converter: Arc::new(Fake),
         slots: Arc::new(Semaphore::new(1)),
+        vision: Arc::new(ScriptedVision { outcome: VisionOutcome::Skipped, calls: std::sync::atomic::AtomicUsize::new(0) }),
     });
     let response = open
         .oneshot(

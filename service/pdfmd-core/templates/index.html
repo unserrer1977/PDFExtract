@@ -187,7 +187,8 @@
       const meta = document.createElement("p");
       meta.className = "meta";
       const pages = payload.pages === 1 ? "1 page" : payload.pages + " pages";
-      meta.textContent = pages + (payload.image_based ? " · image-based" : "");
+      const image = payload.vision_fallback ? " · read from images" : (payload.image_based ? " · image-based" : "");
+      meta.textContent = pages + image;
       result.appendChild(meta);
       const doc = document.createElement("div");
       doc.className = "doc";

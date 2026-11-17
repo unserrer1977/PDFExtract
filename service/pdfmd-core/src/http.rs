@@ -9,12 +9,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::logic::{compose, looks_like_pdf, ConvertFailure, Conversion, Extract, OwnedPdf, MAX_PDF_BYTES};
 use crate::openapi::OPENAPI;
 use crate::ssrf::fetch_pdf;
+use crate::vision::{finish_vision, OpenRouterVision, VisionOcr};
 
 const INDEX: &str = include_str!("../templates/index.html");
 
@@ -27,6 +28,7 @@ pub struct AppState<C> {
     pub api_key: String,
     pub converter: Arc<C>,
     pub slots: Arc<Semaphore>,
+    pub vision: Arc<dyn VisionOcr>,
 }
 
 impl<C> Clone for AppState<C> {
@@ -35,6 +37,7 @@ impl<C> Clone for AppState<C> {
             api_key: self.api_key.clone(),
             converter: Arc::clone(&self.converter),
             slots: Arc::clone(&self.slots),
+            vision: Arc::clone(&self.vision),
         }
     }
 }
@@ -57,6 +60,7 @@ pub fn boot<C: PdfConvert>(converter: C) -> Result<(), String> {
         api_key,
         converter: Arc::new(converter),
         slots: Arc::new(Semaphore::new(1)),
+        vision: Arc::new(OpenRouterVision::from_env()),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|err| err.to_string())?;
     runtime.block_on(async move {
@@ -112,17 +116,22 @@ async fn convert<C: PdfConvert>(State(state): State<AppState<C>>, Query(query): 
         Ok(permit) => permit,
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "Conversion is unavailable"),
     };
+    let source = input.bytes.clone();
     let converter = Arc::clone(&state.converter);
-    let joined = tokio::task::spawn_blocking(move || {
-        let _permit: OwnedSemaphorePermit = permit;
-        process(converter.as_ref(), input)
-    })
-    .await;
-    match joined {
-        Ok(Ok(conversion)) => respond(conversion, markdown),
-        Ok(Err(failure)) => error(status_code(failure.status), failure.message),
-        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Conversion task stopped"),
-    }
+    let joined = tokio::task::spawn_blocking(move || process(converter.as_ref(), input)).await;
+    let conversion = match joined {
+        Ok(Ok(conversion)) => conversion,
+        Ok(Err(failure)) => return error(status_code(failure.status), failure.message),
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "Conversion task stopped"),
+    };
+    let conversion = if conversion.image_based {
+        let outcome = state.vision.transcribe(&source, conversion.pages).await;
+        finish_vision(conversion, outcome)
+    } else {
+        conversion
+    };
+    drop(permit);
+    respond(conversion, markdown)
 }
 
 fn process<C: PdfConvert>(converter: &C, input: OwnedPdf) -> Result<Conversion, ConvertFailure> {

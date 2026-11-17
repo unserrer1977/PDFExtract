@@ -9,7 +9,9 @@ description = "HTTP API that turns a PDF into structured Markdown"
 axum = "0.8"
 bytes = "1"
 futures-util = "0.3"
+base64 = "0.22"
 http-body-util = "0.1"
+lopdf = "0.36"
 multer = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
