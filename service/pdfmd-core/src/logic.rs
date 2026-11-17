@@ -5,6 +5,10 @@ pub const MAX_PDF_BYTES: usize = 32 * 1024 * 1024;
 
 pub const IMAGE_NOTICE: &str = "This file looks like a scan or a set of pictures. PdfCraft did not find a text layer, so words that exist only inside images are not in this document.";
 
+pub const VISION_NOTICE: &str = "PdfCraft found no text layer. The words below were read from the page images.";
+
+pub const VISION_FAILED_NOTE: &str = "The image reader did not return text.";
+
 /// What PdfCraft returned before this service adds a title and any notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extract {
@@ -45,6 +49,8 @@ pub struct Conversion {
     pub truncated_pages: Vec<usize>,
     pub image_based: bool,
     pub notice: Option<String>,
+    /// True when the Markdown was transcribed from page images after PdfCraft found no text layer.
+    pub vision_fallback: bool,
 }
 
 /// PdfCraft found pages, but almost no letters, and the file is pictures or has no text.
@@ -110,7 +116,54 @@ pub fn compose(extract: Extract, source: &[u8]) -> Conversion {
         truncated_pages: extract.truncated_pages,
         image_based,
         notice: image_based.then(|| IMAGE_NOTICE.to_string()),
+        vision_fallback: false,
     }
+}
+
+/// Replace an empty image extract with text read from the page images.
+pub fn apply_vision(conversion: Conversion, transcript: &str) -> Conversion {
+    let transcript = transcript.trim();
+    let mut markdown = String::new();
+    markdown.push_str("> **Image-based PDF.** ");
+    markdown.push_str(VISION_NOTICE);
+    markdown.push_str("\n\n");
+    if let Some(title) = conversion.title.as_deref().map(str::trim).filter(|title| !title.is_empty()) {
+        markdown.push_str("# ");
+        markdown.push_str(&single_line(title));
+        markdown.push_str("\n\n");
+    }
+    markdown.push_str(transcript);
+    if !markdown.ends_with('\n') {
+        markdown.push('\n');
+    }
+    Conversion {
+        markdown,
+        title: conversion.title,
+        pages: conversion.pages,
+        truncated_pages: conversion.truncated_pages,
+        image_based: true,
+        notice: Some(VISION_NOTICE.to_string()),
+        vision_fallback: true,
+    }
+}
+
+/// Keep the scan notice and say the image reader did not recover any words.
+pub fn note_vision_failure(mut conversion: Conversion) -> Conversion {
+    let notice = match conversion.notice.take() {
+        Some(notice) if notice.contains(VISION_FAILED_NOTE) => notice,
+        Some(notice) => format!("{notice} {VISION_FAILED_NOTE}"),
+        None => VISION_FAILED_NOTE.to_string(),
+    };
+    if !conversion.markdown.contains(VISION_FAILED_NOTE) {
+        if !conversion.markdown.ends_with('\n') {
+            conversion.markdown.push('\n');
+        }
+        conversion.markdown.push('\n');
+        conversion.markdown.push_str(VISION_FAILED_NOTE);
+        conversion.markdown.push('\n');
+    }
+    conversion.notice = Some(notice);
+    conversion
 }
 
 fn truncation_note(pages: &[usize]) -> String {
@@ -202,6 +255,35 @@ mod tests {
         assert!(conversion.markdown.contains("# Scan"));
         assert!(conversion.markdown.contains("page 2"));
         assert!(!conversion.markdown.contains("!["));
+    }
+
+    #[test]
+    fn vision_text_replaces_the_empty_scan() {
+        let source = b"%PDF-1.4\n/Subtype /Image\n";
+        let conversion = compose(
+            Extract { title: Some("Scan".into()), pages: 1, truncated_pages: Vec::new(), markdown: String::new() },
+            source,
+        );
+        let recovered = apply_vision(conversion, "## Page 1\n\nRevenue rose.\n");
+        assert!(recovered.vision_fallback);
+        assert_eq!(recovered.notice.as_deref(), Some(VISION_NOTICE));
+        assert!(recovered.markdown.contains("## Page 1"));
+        assert!(recovered.markdown.contains("Revenue rose."));
+        assert!(recovered.markdown.contains("# Scan"));
+        assert!(!recovered.markdown.contains(IMAGE_NOTICE));
+    }
+
+    #[test]
+    fn a_failed_image_reader_keeps_the_scan_notice() {
+        let source = b"%PDF-1.4\n/Subtype /Image\n";
+        let conversion = note_vision_failure(compose(
+            Extract { title: None, pages: 1, truncated_pages: Vec::new(), markdown: String::new() },
+            source,
+        ));
+        assert!(!conversion.vision_fallback);
+        assert!(conversion.notice.unwrap().contains(VISION_FAILED_NOTE));
+        assert!(conversion.markdown.contains(IMAGE_NOTICE));
+        assert!(conversion.markdown.contains(VISION_FAILED_NOTE));
     }
 
     #[test]

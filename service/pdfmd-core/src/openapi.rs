@@ -5,7 +5,7 @@ pub const OPENAPI: &str = r##"{
   "info": {
     "title": "PDFExtract",
     "version": "0.1.0",
-    "description": "Convert a PDF to structured Markdown using PdfCraft. Send a file or a URL. Images in the PDF are not copied into the Markdown. Image-only PDFs are reported to the caller."
+    "description": "Convert a PDF to structured Markdown using PdfCraft. Send a file or a URL. Images in the PDF are not copied into the Markdown. When PdfCraft finds no text layer, the service transcribes the page images and says so."
   },
   "components": {
     "securitySchemes": {
@@ -24,6 +24,7 @@ pub const OPENAPI: &str = r##"{
           "pages": {"type": "integer"},
           "truncated_pages": {"type": "array", "items": {"type": "integer"}, "description": "Zero-based page indexes PdfCraft could not read completely."},
           "image_based": {"type": "boolean"},
+          "vision_fallback": {"type": "boolean", "description": "True when the Markdown was read from page images because PdfCraft found no text layer."},
           "notice": {"type": "string", "nullable": true}
         }
       },
