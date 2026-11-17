@@ -1,0 +1,16 @@
+[package]
+name = "pdfmd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "PDFExtract server. PdfCraft reads the PDF; this binary serves the API."
+
+[[bin]]
+name = "pdfmd"
+path = "src/main.rs"
+
+[dependencies]
+pdfmd-core = { path = "../pdfmd-core" }
+pdfcraft-engine = { workspace = true }
+
+[lints]

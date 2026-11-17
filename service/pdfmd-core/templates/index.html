@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDFExtract</title>
+  <style>
+    :root {
+      --ink: #1c1915;
+      --muted: #5e564c;
+      --paper: #f3eee6;
+      --card: #fffaf3;
+      --line: #ddd4c6;
+      --teal: #0d5c5c;
+      --teal-dark: #094646;
+      --warn: #8a3b12;
+      --warn-bg: #f8e6d4;
+      --bad: #8d1d2c;
+      --bad-bg: #f8e4e6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 400px at 10% -10%, #efe4d2 0%, transparent 55%),
+        var(--paper);
+      font: 17px/1.5 "Avenir Next", "Segoe UI", sans-serif;
+    }
+    main { max-width: 880px; margin: 0 auto; padding: 40px 20px 72px; }
+    header h1 {
+      margin: 0;
+      font-family: Palatino, "Palatino Linotype", "Iowan Old Style", Georgia, serif;
+      font-size: 46px;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+    }
+    header p { margin: 8px 0 0; color: var(--muted); max-width: 38em; }
+    form, .result, .banner {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+    }
+    form { margin-top: 28px; padding: 22px; display: grid; gap: 14px; }
+    label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
+    input[type="text"], input[type="password"], input[type="url"], input[type="file"] {
+      width: 100%;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .row { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+    button {
+      justify-self: start;
+      font: inherit;
+      color: #fff;
+      background: var(--teal);
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 18px;
+      cursor: pointer;
+    }
+    button:hover { background: var(--teal-dark); }
+    button:disabled { opacity: 0.6; cursor: progress; }
+    .banner { margin-top: 18px; padding: 14px 16px; }
+    .banner.warn { background: var(--warn-bg); color: var(--warn); border-color: #efd0b4; }
+    .banner.bad { background: var(--bad-bg); color: var(--bad); border-color: #f0c4c8; }
+    .result { margin-top: 18px; padding: 8px 28px 24px; }
+    .doc {
+      font-family: Palatino, "Palatino Linotype", Georgia, serif;
+      font-size: 19px;
+      line-height: 1.55;
+    }
+    .doc h1, .doc h2, .doc h3 { line-height: 1.2; letter-spacing: -0.02em; }
+    .doc table { border-collapse: collapse; width: 100%; margin: 1em 0; font-family: "Avenir Next", "Segoe UI", sans-serif; font-size: 15px; }
+    .doc th, .doc td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+    .doc blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--teal); color: var(--muted); }
+    .doc code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86em; background: #f3eee6; padding: 0 4px; border-radius: 4px; }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #1c1915;
+      color: #f3eee6;
+      border-radius: 12px;
+      padding: 14px;
+      font-size: 13px;
+    }
+    details { margin-top: 8px; }
+    .meta { color: var(--muted); font-size: 14px; }
+    @media (max-width: 700px) {
+      .row { grid-template-columns: 1fr; }
+      header h1 { font-size: 36px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>PDFExtract</h1>
+      <p>Turn a PDF into structured Markdown with PdfCraft. Headings, emphasis and tables stay. Pictures are left out. A scan with no text layer is called out instead of being silently emptied.</p>
+    </header>
+    <form id="convert">
+      <label>API key
+        <input id="key" type="password" autocomplete="off" required>
+      </label>
+      <div class="row">
+        <label>PDF file
+          <input id="file" type="file" accept="application/pdf,.pdf">
+        </label>
+        <label>Or a URL
+          <input id="url" type="url" placeholder="https://example.com/report.pdf">
+        </label>
+      </div>
+      <label>Password, if the PDF asks for one
+        <input id="password" type="password" autocomplete="off">
+      </label>
+      <button type="submit">Convert</button>
+    </form>
+    <div id="status"></div>
+    <article id="result" hidden></article>
+  </main>
+  <script>
+    const keyInput = document.querySelector("#key");
+    const saved = sessionStorage.getItem("pdfextract-key");
+    if (saved) keyInput.value = saved;
+
+    document.querySelector("#convert").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const status = document.querySelector("#status");
+      const result = document.querySelector("#result");
+      const button = event.target.querySelector("button");
+      const file = document.querySelector("#file").files[0];
+      const url = document.querySelector("#url").value.trim();
+      const key = keyInput.value.trim();
+      status.innerHTML = "";
+      result.hidden = true;
+      result.innerHTML = "";
+      if (!file && !url) {
+        show("bad", "Choose a PDF or paste a URL.");
+        return;
+      }
+      if (file && url) {
+        show("bad", "Send a file or a URL, not both.");
+        return;
+      }
+      sessionStorage.setItem("pdfextract-key", key);
+      const body = new FormData();
+      if (file) body.append("file", file);
+      if (url) body.append("url", url);
+      const password = document.querySelector("#password").value;
+      if (password) body.append("password", password);
+      button.disabled = true;
+      try {
+        const response = await fetch("/v1/convert", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + key },
+          body
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          show("bad", payload.error || "Conversion failed.");
+          return;
+        }
+        if (payload.notice) show("warn", payload.notice);
+        renderResult(payload);
+      } catch (err) {
+        show("bad", "The request did not finish.");
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    function show(kind, text) {
+      const status = document.querySelector("#status");
+      const banner = document.createElement("div");
+      banner.className = "banner " + kind;
+      banner.textContent = text;
+      status.appendChild(banner);
+    }
+
+    function renderResult(payload) {
+      const result = document.querySelector("#result");
+      result.hidden = false;
+      const meta = document.createElement("p");
+      meta.className = "meta";
+      const pages = payload.pages === 1 ? "1 page" : payload.pages + " pages";
+      meta.textContent = pages + (payload.image_based ? " · image-based" : "");
+      result.appendChild(meta);
+      const doc = document.createElement("div");
+      doc.className = "doc";
+      renderMarkdown(payload.markdown || "", doc);
+      result.appendChild(doc);
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "Markdown";
+      details.appendChild(summary);
+      const pre = document.createElement("pre");
+      pre.textContent = payload.markdown || "";
+      details.appendChild(pre);
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.textContent = "Copy Markdown";
+      copy.addEventListener("click", () => navigator.clipboard.writeText(payload.markdown || ""));
+      details.appendChild(copy);
+      result.appendChild(details);
+    }
+
+    function renderMarkdown(markdown, root) {
+      const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        if (!line.trim()) { i += 1; continue; }
+        if (line.startsWith("```")) {
+          const buf = [];
+          i += 1;
+          while (i < lines.length && !lines[i].startsWith("```")) { buf.push(lines[i]); i += 1; }
+          const pre = document.createElement("pre");
+          pre.textContent = buf.join("\n");
+          root.appendChild(pre);
+          i += 1;
+          continue;
+        }
+        if (/^#{1,3}\s/.test(line)) {
+          const level = line.match(/^#+/)[0].length;
+          root.appendChild(inline(document.createElement("h" + level), line.replace(/^#+\s*/, "")));
+          i += 1;
+          continue;
+        }
+        if (/^---+$/.test(line.trim()) || line.trim() === "***") {
+          root.appendChild(document.createElement("hr"));
+          i += 1;
+          continue;
+        }
+        if (line.trim().startsWith("|")) {
+          const rows = [];
+          while (i < lines.length && lines[i].trim().startsWith("|")) { rows.push(lines[i]); i += 1; }
+          root.appendChild(table(rows));
+          continue;
+        }
+        if (line.startsWith(">")) {
+          const buf = [];
+          while (i < lines.length && lines[i].startsWith(">")) {
+            buf.push(lines[i].replace(/^>\s?/, ""));
+            i += 1;
+          }
+          root.appendChild(inline(document.createElement("blockquote"), buf.join(" ")));
+          continue;
+        }
+        if (/^\s*[-*]\s+/.test(line)) {
+          const list = document.createElement("ul");
+          while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+            list.appendChild(inline(document.createElement("li"), lines[i].replace(/^\s*[-*]\s+/, "")));
+            i += 1;
+          }
+          root.appendChild(list);
+          continue;
+        }
+        const buf = [line];
+        i += 1;
+        while (i < lines.length && lines[i].trim() && !/^(#{1,3}\s|>|\||```)/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i])) {
+          buf.push(lines[i]);
+          i += 1;
+        }
+        root.appendChild(inline(document.createElement("p"), buf.join(" ")));
+      }
+    }
+
+    function table(rows) {
+      const table = document.createElement("table");
+      const body = document.createElement("tbody");
+      rows.forEach((row, index) => {
+        if (/^\s*\|?\s*:?-{3,}/.test(row)) return;
+        const cells = row.split("|").slice(1, -1);
+        if (!row.endsWith("|")) cells.pop();
+        const tr = document.createElement("tr");
+        cells.forEach((cell) => {
+          tr.appendChild(inline(document.createElement(index === 0 ? "th" : "td"), cell.trim()));
+        });
+        body.appendChild(tr);
+      });
+      table.appendChild(body);
+      return table;
+    }
+
+    function inline(node, text) {
+      const pattern = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
+      let last = 0;
+      for (const match of text.matchAll(pattern)) {
+        if (match.index > last) node.appendChild(document.createTextNode(text.slice(last, match.index)));
+        const token = match[0];
+        if (token.startsWith("**")) node.appendChild(tag("strong", token.slice(2, -2)));
+        else if (token.startsWith("`")) node.appendChild(tag("code", token.slice(1, -1)));
+        else node.appendChild(tag("em", token.slice(1, -1)));
+        last = match.index + token.length;
+      }
+      if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
+      return node;
+    }
+
+    function tag(name, text) {
+      const node = document.createElement(name);
+      node.textContent = text;
+      return node;
+    }
+  </script>
+</body>
+</html>
